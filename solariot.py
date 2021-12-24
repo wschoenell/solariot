@@ -41,17 +41,17 @@ import time
 import sys
 import re
 
+MIN_SIGNED = -2147483648
+MAX_UNSIGNED = 4294967295
 
-MIN_SIGNED   = -2147483648
-MAX_UNSIGNED =  4294967295
-
-requests.packages.urllib3.disable_warnings() 
+requests.packages.urllib3.disable_warnings()
 
 # Load in the config module
 parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config", default="config", help="Python module to load as our config")
 parser.add_argument("-v", "--verbose", action="count", default=0, help="Level of verbosity 0=ERROR 1=INFO 2=DEBUG")
-parser.add_argument("--one-shot", action="store_true", help="Run solariot just once then exit, useful for cron based execution")
+parser.add_argument("--one-shot", action="store_true",
+                    help="Run solariot just once then exit, useful for cron based execution")
 args = parser.parse_args()
 
 if args.verbose == 0:
@@ -72,13 +72,13 @@ except ModuleNotFoundError:
 # SMA datatypes and their register lengths
 # S = Signed Number, U = Unsigned Number, STR = String
 sma_moddatatype = {
-  "S16": 1,
-  "U16": 1,
-  "S32": 2,
-  "U32": 2,
-  "U64": 4,
-  "STR16": 8,
-  "STR32": 16,
+    "S16": 1,
+    "U16": 1,
+    "S32": 2,
+    "U32": 2,
+    "U64": 4,
+    "STR16": 8,
+    "STR32": 16,
 }
 
 # Load the modbus register map for the inverter
@@ -130,8 +130,8 @@ else:
 if hasattr(config, "prometheus"):
     class PrometheusPublisher(object):
         def __init__(self, port):
-            self.publishport=port
-            self.metric_mappings={}
+            self.publishport = port
+            self.metric_mappings = {}
             start_http_server(self.publishport)
             logging.info(f"prometheus: http server started on port {self.publishport}")
 
@@ -143,13 +143,14 @@ if hasattr(config, "prometheus"):
                     continue
                 elif not key in self.metric_mappings.keys():
                     logging.info(f"prometheus: key {key} doesnt have a gauge. making one now")
-                    self.metric_mappings[key] =  Gauge('solar_' + key, key)
+                    self.metric_mappings[key] = Gauge('solar_' + key, key)
 
                 self.metric_mappings[key].set(metrics[key])
 
         def Clear_status(self):
             for key in self.metric_mappings.keys():
                 key.set(0)
+
 
     promport = getattr(config, "prometheus_port", "8000")
     prom_client = PrometheusPublisher(promport)
@@ -178,7 +179,8 @@ else:
 # Configure PVOutput
 if hasattr(config, "pvoutput_api"):
     class PVOutputPublisher(object):
-        def __init__(self, api_key, system_id, metric_mappings, rate_limit=60, status_url="https://pvoutput.org/service/r2/addstatus.jsp"):
+        def __init__(self, api_key, system_id, metric_mappings, rate_limit=60,
+                     status_url="https://pvoutput.org/service/r2/addstatus.jsp"):
             self.api_key = api_key
             self.system_id = system_id
             self.status_url = status_url
@@ -207,7 +209,7 @@ if hasattr(config, "pvoutput_api"):
             * v5 - Temperature
             * v6 - Voltage
             """
-            at_least_one_of = set(["v1", "v2", "v3", "v4"])
+            at_least_one_of = {"v1", "v2", "v3", "v4"}
 
             now = datetime.datetime.now()
 
@@ -253,6 +255,7 @@ if hasattr(config, "pvoutput_api"):
             logging.debug("Successfully posted status update to PVOutput")
             self.latest_run = now
 
+
     pvoutput_client = PVOutputPublisher(
         config.pvoutput_api,
         config.pvoutput_sid,
@@ -268,6 +271,7 @@ else:
 # Inverter Scanning
 inverter = {}
 bus = json.loads(modmap.scan)
+
 
 def load_registers(register_type, start, count=100):
     try:
@@ -357,6 +361,7 @@ def load_registers(register_type, start, count=100):
 
     return True
 
+
 # Function for polling data from the target and triggering writing to log file if set
 def load_sma_register(registers):
     # Request each register from datasets, omit first row which contains only column headers
@@ -365,7 +370,7 @@ def load_sma_register(registers):
         startPos = thisrow[1]
         type = thisrow[2]
         format = thisrow[3]
-    
+
         # If the connection is somehow not possible (e.g. target not responding)
         # show a error message instead of excepting and stopping
         try:
@@ -378,7 +383,7 @@ def load_sma_register(registers):
             thisdate = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logging.error(f"{thisdate}: Connection not possible, check settings or connection")
             return
-    
+
         message = BinaryPayloadDecoder.fromRegisters(received.registers, endian=Endian.Big)
 
         # Provide the correct result depending on the defined datatype
@@ -399,7 +404,7 @@ def load_sma_register(registers):
         else:
             # If no data type is defined do raw interpretation of the delivered data
             interpreted = message.decode_16bit_uint()
-    
+
         # Check for "None" data before doing anything else
         if ((interpreted == MIN_SIGNED) or (interpreted == MAX_UNSIGNED)):
             displaydata = None
@@ -413,27 +418,31 @@ def load_sma_register(registers):
                 displaydata = float(interpreted) / 10
             else:
                 displaydata = interpreted
-    
+
         logging.debug(f"************** {name} = {displaydata}")
         inverter[name] = displaydata
-  
+
     # Add timestamp
     inverter["00000 - Timestamp"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 
 def publish_prometheus(inverter):
     result = prom_client.publish_status(inverter)
     if result:
         logging.info("Published to prometheus")
 
+
 def publish_influx(metrics):
     target = flux_client.write_points([metrics])
     logging.info("Published to InfluxDB")
     return target
 
+
 def publish_dweepy(inverter):
     result = dweepy.dweet_for(config.dweepy_uuid, inverter)
     logging.info("Published to dweet.io")
     return result
+
 
 def publish_mqtt(inverter):
     # After a while you'll need to reconnect, so just reconnect before each publish
@@ -450,6 +459,7 @@ def publish_mqtt(inverter):
 
     return result
 
+
 def publish_pvoutput(inverter):
     result = pvoutput_client.publish_status(inverter)
 
@@ -459,15 +469,17 @@ def publish_pvoutput(inverter):
         logging.info("Published to PVOutput")
     return result
 
+
 def save_json(inverter):
     try:
-        f = open(config.json_file,'w')
+        f = open(config.json_file, 'w')
         f.write(json.dumps(inverter))
         f.close()
     except Exception as err:
         logging.error("Error writing telemetry to file: %s" % err)
         return
     logging.info("Inverter telemetry written to %s file." % config.json_file)
+
 
 # Core monitoring loop
 def scrape_inverter():
@@ -482,7 +494,7 @@ def scrape_inverter():
         for i in bus["holding"]:
             if not load_registers("holding", i["start"], int(i["range"])):
                 return False
-  
+
         # Sungrow inverter specifics:
         # Work out if the grid power is being imported or exported
         if config.model == "sungrow-sh5k":
@@ -514,6 +526,7 @@ def scrape_inverter():
     logging.info(inverter)
     return True
 
+
 while True:
     # Scrape the inverter
     success = scrape_inverter()
@@ -521,7 +534,7 @@ while True:
     if not success:
         # reset counters otherwise prometheus will keep on reporting whatever was pushed last
         if prom_client is not None:
-          prom_client.Clear_status()
+            prom_client.Clear_status()
         logging.warning("Failed to scrape inverter, sleeping until next scan")
         time.sleep(config.scan_interval)
         continue
