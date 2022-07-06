@@ -3,6 +3,7 @@ import datetime
 
 import requests
 
+dry_run = False
 
 class PVOutputPublisher(object):
     def __init__(self, api_key, system_id, metric_mappings, rate_limit=60,
@@ -26,7 +27,7 @@ class PVOutputPublisher(object):
 
     def publish_status(self, metrics):
         """
-        See https://pvoutput.org/help.html#api-addstatus
+        See https://pvoutput.org/help/api_specification.html#add-status-service
         Post the following values:
         * v1 - Energy Generation
         * v2 - Power Generation
@@ -63,6 +64,10 @@ class PVOutputPublisher(object):
 
         if self.metric_mappings.get("Power Consumption") in metrics:
             parameters["v4"] = metrics[self.metric_mappings.get("Power Consumption")]
+        elif self.metric_mappings.get("Active Power") in metrics:
+            parameters["v4"] = metrics[self.metric_mappings.get("Active Power")]
+            if self.metric_mappings.get("Power Generation") in metrics:
+                parameters["v4"] += metrics[self.metric_mappings.get("Power Generation")]
 
         if self.metric_mappings.get("Temperature") in metrics:
             parameters["v5"] = metrics[self.metric_mappings.get("Temperature")]
@@ -70,13 +75,20 @@ class PVOutputPublisher(object):
         if self.metric_mappings.get("Voltage") in metrics:
             parameters["v6"] = metrics[self.metric_mappings.get("Voltage")]
 
+        for v in range(7, 13):
+            if self.metric_mappings.get(f"v{v}") in metrics:
+                parameters[f"v{v}"] = metrics[self.metric_mappings.get(f"v{v}")]
+
         if not at_least_one_of.intersection(parameters.keys()):
             raise RuntimeError("Metrics => PVOutput mapping failed, please review metric names and update")
 
-        response = requests.post(url=self.status_url, headers=self.headers, params=parameters)
+        logging.info(f"Publishing on PVOutput: {parameters}, metrics: {metrics}")
 
-        if response.status_code != requests.codes.ok:
-            raise RuntimeError(response.text)
+        if not dry_run:
+            response = requests.post(url=self.status_url, headers=self.headers, params=parameters)
+
+            if response.status_code != requests.codes.ok:
+                raise RuntimeError(response.text)
 
         logging.debug("Successfully posted status update to PVOutput")
         self.latest_run = now

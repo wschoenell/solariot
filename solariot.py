@@ -41,6 +41,8 @@ import time
 import sys
 import re
 
+from dds578_meter import DDS578Meter
+from dtsu666_meter import DTSU666Meter
 from pvoutputpublisher import PVOutputPublisher
 
 MIN_SIGNED = -2147483648
@@ -101,16 +103,36 @@ client_payload = {
     "port": config.inverter_port,
 }
 
-if "sungrow-" in config.model:
-    logging.info("Creating SungrowModbusTcpClient")
-    client = SungrowModbusTcpClient.SungrowModbusTcpClient(**client_payload)
-else:
-    logging.info("Creating ModbusTcpClient")
-    client = ModbusTcpClient(**client_payload)
+t0 = 0
+t0_csv = 0
 
-logging.info("Connecting")
-client.connect()
-logging.info("Connected")
+
+def connect_client():
+    if "sungrow-" in config.model:
+        logging.info("Creating SungrowModbusTcpClient")
+        client = SungrowModbusTcpClient.SungrowModbusTcpClient(**client_payload)
+    else:
+        logging.info("Creating ModbusTcpClient")
+        client = ModbusTcpClient(**client_payload)
+
+    logging.info("Connecting")
+    client.connect()
+    logging.info("Connected")
+
+    return client
+
+
+client = connect_client()
+
+# Configure meters
+meters = []
+if hasattr(config, "dtsu666_port") and hasattr(config, "dtsu666_unit"):
+    meters.append(DTSU666Meter(port=config.dtsu666_port, unit=config.dtsu666_unit))
+if hasattr(config, "dds578_port") and hasattr(config, "dds578_unit"):
+    if hasattr(config, "dtsu666_port") and config.dtsu666_port == config.dds578_port:
+        meters.append(DDS578Meter(client=meters[-1].client))
+    else:
+        meters.append(DDS578Meter(port=config.dds578_port, unit=config.dds578_unit))
 
 # Configure MQTT
 if hasattr(config, "mqtt_server"):
@@ -219,6 +241,7 @@ def load_registers(register_type, start, count=100):
 
     if rr.isError():
         logging.warning("Modbus connection failed")
+        client.close()  # close client connection to force reload
         return False
 
     if not hasattr(rr, 'registers'):
@@ -384,6 +407,14 @@ def publish_mqtt(inverter):
     return result
 
 
+def publish_ui(inverter):
+    response = requests.post(url=config.ui_url, json=inverter)
+    if response.status_code != requests.codes.ok:
+        logging.error("Error publishing to ui")
+    else:
+        logging.info("Published data to ui")
+
+
 def publish_pvoutput(inverter):
     result = pvoutput_client.publish_status(inverter)
 
@@ -405,13 +436,37 @@ def save_json(inverter):
     logging.info("Inverter telemetry written to %s file." % config.json_file)
 
 
+def save_csv(inverter):
+    global t0_csv
+    if (time.time() - t0_csv) < 60:
+        logging.info("Skipping csv file, t < 60s")
+        return
+    try:
+        now = datetime.datetime.now()
+        with open(config.csv_file_prefix + now.strftime("%Y%m%d") + ".csv", 'a') as fp:
+            string = f"{now.strftime('%H:%M:%S')},"
+            for metric in ("Energy Generation", "Power Generation", "Temperature", "Voltage", "Active Power", "v7"):
+                if metric in modmap.pvoutput:
+                    try:
+                        string += f"{inverter[modmap.pvoutput.get(metric)]},"
+                    except KeyError:
+                        string += f","
+            fp.write(string + "\n")
+    except Exception as err:
+        logging.error("Error writing telemetry to file: %s" % err)
+        return
+    logging.info("Inverter telemetry written to csv file.")
+    t0_csv = time.time()
+
+
 # Core monitoring loop
 def scrape_inverter():
     """ Connect to the inverter and scrape the metrics """
 
+    global client
     # Connect only if disconnected
     if not client.is_socket_open():
-        client.connect()
+        client = connect_client()
 
     if "sungrow-" in config.model:
         for i in bus["read"]:
@@ -448,20 +503,41 @@ def scrape_inverter():
     else:
         raise RuntimeError(f"Unsupported inverter model detected: {config.model}")
 
-    logging.info(inverter)
     return True
 
 
 while True:
+    # Wait for next scan time
+    waittime = config.scan_interval - (time.time() - t0)
+    if waittime > 0:
+        logging.info(f"waiting {waittime} for the next cycle")
+        time.sleep(waittime)
+    t0 = time.time()
+    # Clear inverter var
+    inverter = {}
+    # Scrape meters
+    success = True
+    if len(meters) > 0:
+        meter_data = {}
+        for meter in meters:
+            try:
+                meter_data.update(meter.query())
+                time.sleep(0.1)
+            except:
+                logging.error("Error scraping meters")
+                success = False
+        inverter.update(meter_data)
+
     # Scrape the inverter
-    success = scrape_inverter()
+    success = scrape_inverter() or success  # consider meter-only readings as success
+
+    logging.info(f"inverter: {inverter}")
 
     if not success:
         # reset counters otherwise prometheus will keep on reporting whatever was pushed last
         if prom_client is not None:
             prom_client.Clear_status()
-        logging.warning("Failed to scrape inverter, sleeping until next scan")
-        time.sleep(config.scan_interval)
+            logging.warning("Failed to scrape inverter, skipping this scan")
         continue
 
     # Optionally publish the metrics if enabled
@@ -497,9 +573,14 @@ while True:
         t = Thread(target=save_json, args=(inverter,))
         t.start()
 
+    if hasattr(config, "csv_file_prefix"):
+        t = Thread(target=save_csv, args=(inverter,))
+        t.start()
+
+    if hasattr(config, "ui_url"):
+        t = Thread(target=publish_ui, args=(inverter,))
+        t.start()
+
     if args.one_shot:
         logging.info("Exiting due to --one-shot")
         break
-
-    # Sleep until the next scan
-    time.sleep(config.scan_interval)
